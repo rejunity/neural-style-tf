@@ -8,6 +8,8 @@ import time
 import cv2
 import os
 
+import histogram
+
 '''
   parsing and configuration
 '''
@@ -60,6 +62,10 @@ def parse_args():
     default=1e4,
     help='Weight for the style loss function. (default: %(default)s)')
   
+  parser.add_argument('--histogram_weight', type=float, 
+    default=1e6,
+    help='Weight for the style histogram matching loss function. (default: %(default)s)')  
+
   parser.add_argument('--tv_weight', type=float, 
     default=1e-3,
     help='Weight for the total variational loss function. Set small (e.g. 1e-3). (default: %(default)s)')
@@ -80,6 +86,10 @@ def parse_args():
   parser.add_argument('--style_layers', nargs='+', type=str,
     default=['relu1_1', 'relu2_1', 'relu3_1', 'relu4_1', 'relu5_1'],
     help='VGG19 layers used for the style image. (default: %(default)s)')
+
+  parser.add_argument('--histogram_layers', nargs='+', type=str,
+    default=['relu1_1', 'relu4_1'],
+    help='VGG19 layers used for the style image and take part in histogram matching. (default: %(default)s)')
   
   parser.add_argument('--content_layer_weights', nargs='+', type=float, 
     default=[1.0], 
@@ -88,6 +98,14 @@ def parse_args():
   parser.add_argument('--style_layer_weights', nargs='+', type=float, 
     default=[0.2, 0.2, 0.2, 0.2, 0.2],
     help='Contributions (weights) of each style layer to loss. (default: %(default)s)')
+
+  parser.add_argument('--histogram_layer_weights', nargs='+', type=float, 
+    default=[0.5, 0.5],
+    help='Contributions (weights) of each style layer to histogram matching loss. (default: %(default)s)')
+
+  parser.add_argument('--histogram_bins', type=int, 
+    default=256,
+    help='Number of bins used for histogram matching. (default: %(default)s)')
     
   parser.add_argument('--original_colors', action='store_true',
     help='Transfer the style but not the colors.')
@@ -218,9 +236,10 @@ def parse_args():
     args.device = None
 
   # normalize weights
-  args.style_layer_weights   = normalize(args.style_layer_weights)
-  args.content_layer_weights = normalize(args.content_layer_weights)
-  args.style_imgs_weights    = normalize(args.style_imgs_weights)
+  args.style_layer_weights      = normalize(args.style_layer_weights)
+  args.histogram_layer_weights  = normalize(args.histogram_layer_weights)
+  args.content_layer_weights    = normalize(args.content_layer_weights)
+  args.style_imgs_weights       = normalize(args.style_imgs_weights)
 
   # create directories for output
   if args.video:
@@ -375,6 +394,24 @@ def gram_matrix(x, area, depth):
   G = tf.matmul(tf.transpose(F), F)
   return G
 
+def histogram_layer_loss(a, x, nbins):
+  _, h, w, d = a.get_shape()
+  M = h.value * w.value
+  N = d.value
+
+  a = tf.squeeze(a, axis=[0])
+  x = tf.squeeze(x, axis=[0])
+  a = tf.transpose(a, perm=[2, 0, 1])
+  x = tf.transpose(x, perm=[2, 0, 1])
+  a = tf.reshape(a, (N, M))
+  x = tf.reshape(x, (N, M))
+
+  x_matched_to_a = histogram.match_histogram_featurewise(a, x, nbins)
+  x_matched_to_a = tf.stop_gradient(x_matched_to_a)
+
+  loss = (1./(N * M)) * tf.reduce_sum(tf.pow((x - x_matched_to_a), 2))
+  return loss
+
 def mask_style_layer(a, x, mask_img):
   _, h, w, d = a.get_shape()
   mask = get_mask_image(mask_img, w.value, h.value)
@@ -422,6 +459,24 @@ def sum_style_losses(sess, net, style_imgs):
     total_style_loss += (style_loss * img_weight)
   total_style_loss /= float(len(style_imgs))
   return total_style_loss
+
+def sum_histogram_losses(sess, net, style_imgs):
+  total_histogram_loss = 0.
+  weights = args.style_imgs_weights
+  for img, img_weight in zip(style_imgs, weights):
+    sess.run(net['input'].assign(img))
+    histogram_loss = 0.
+    for layer, weight in zip(args.histogram_layers, args.histogram_layer_weights):
+      if layer == '' or weight == 0:
+        continue
+      a = sess.run(net[layer])
+      x = net[layer] # we are optimizing x
+      a = tf.convert_to_tensor(a) # towards a
+      histogram_loss += histogram_layer_loss(a, x, args.histogram_bins) * weight
+    histogram_loss /= float(len(args.histogram_layers))
+    total_histogram_loss += (histogram_loss * img_weight)
+  total_histogram_loss /= float(len(style_imgs))
+  return total_histogram_loss
 
 def sum_content_losses(sess, net, content_img):
   sess.run(net['input'].assign(content_img))
@@ -574,7 +629,10 @@ def stylize(content_img, style_imgs, init_img, frame=None):
       L_style = sum_masked_style_losses(sess, net, style_imgs)
     else:
       L_style = sum_style_losses(sess, net, style_imgs)
-    
+
+    # style with histogram matching loss
+    L_histogram = sum_histogram_losses(sess, net, style_imgs)
+
     # content loss
     L_content = sum_content_losses(sess, net, content_img)
     
@@ -585,17 +643,19 @@ def stylize(content_img, style_imgs, init_img, frame=None):
     alpha = args.content_weight
     beta  = args.style_weight
     theta = args.tv_weight
+    gamma = args.histogram_weight
     
     # total loss
     L_total  = alpha * L_content
     L_total += beta  * L_style
     L_total += theta * L_tv
-    
+    L_total += gamma * L_histogram
+
     # video temporal loss
     if args.video and frame > 1:
-      gamma      = args.temporal_weight
+      eta        = args.temporal_weight
       L_temporal = sum_shortterm_temporal_losses(sess, net, frame, init_img)
-      L_total   += gamma * L_temporal
+      L_total   += eta * L_temporal
 
     # optimization algorithm
     optimizer = get_optimizer(L_total)
@@ -685,9 +745,11 @@ def write_image_output(output_img, content_img, style_imgs, init_img):
   f.write('init_type: {}\n'.format(args.init_img_type))
   f.write('content_weight: {}\n'.format(args.content_weight))
   f.write('style_weight: {}\n'.format(args.style_weight))
+  f.write('histogram_weight: {}\n'.format(args.histogram_weight))
   f.write('tv_weight: {}\n'.format(args.tv_weight))
   f.write('content_layers: {}\n'.format(args.content_layers))
   f.write('style_layers: {}\n'.format(args.style_layers))
+  f.write('histogram_layers: {}\n'.format(args.histogram_layers))
   f.write('optimizer_type: {}\n'.format(args.optimizer))
   f.write('max_iterations: {}\n'.format(args.max_iterations))
   f.write('max_image_size: {}\n'.format(args.max_size))
