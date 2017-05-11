@@ -124,22 +124,3 @@ def match_histogram(source, template, nbins):
   values = decompress(values, value_range)
 
   return values
-
-def match_histogram_featurewise(a, x, nbins):
-  from tensorflow.python.ops import array_ops
-  from tensorflow.python.ops import control_flow_ops
-  from tensorflow.python.ops import tensor_array_ops
-
-  n = array_ops.shape(a)[0]
-  ta = tensor_array_ops.TensorArray(dtype=a.dtype, size=n, dynamic_size=False, infer_shape=True)
-
-  def compute(i, ta):
-    x_matched_to_a = match_histogram(x[i], a[i], nbins)
-    ta = ta.write(i, x_matched_to_a)
-    return (i + 1, ta)
-
-  i = tf.constant(0)
-  _, res = control_flow_ops.while_loop(
-    lambda i, _: i < n, compute, (i, ta))
-
-  return res.stack()

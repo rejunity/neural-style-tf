@@ -399,18 +399,32 @@ def histogram_layer_loss(a, x, nbins):
   M = h.value * w.value
   N = d.value
 
-  a = tf.squeeze(a, axis=[0])
-  x = tf.squeeze(x, axis=[0])
-  a = tf.transpose(a, perm=[2, 0, 1])
-  x = tf.transpose(x, perm=[2, 0, 1])
-  a = tf.reshape(a, (N, M))
-  x = tf.reshape(x, (N, M))
-
-  x_matched_to_a = histogram.match_histogram_featurewise(a, x, nbins)
+  x_matched_to_a, x = match_histogram_featurewise(a, x, M, N, nbins)
   x_matched_to_a = tf.stop_gradient(x_matched_to_a)
 
   loss = (1./(N * M)) * tf.reduce_sum(tf.pow((x - x_matched_to_a), 2))
   return loss
+
+def match_histogram_featurewise(a, x, area, depth, nbins):
+  a = tf.squeeze(a, axis=[0])
+  x = tf.squeeze(x, axis=[0])
+  # arrange depth first
+  a = tf.transpose(a, perm=[2, 0, 1])
+  x = tf.transpose(x, perm=[2, 0, 1])
+  a = tf.reshape(a, (depth, area))
+  x = tf.reshape(x, (depth, area))
+
+  ta = tf.TensorArray(size=depth, dtype=a.dtype, dynamic_size=False, infer_shape=True)
+
+  def compute(i, ta):
+    x_matched_to_a = histogram.match_histogram(x[i], a[i], nbins)
+    ta = ta.write(i, x_matched_to_a)
+    return (i + 1, ta)
+
+  i = tf.constant(0)
+  _, res = tf.while_loop(lambda i, _: i < depth, compute, (i, ta))
+
+  return res.stack(), x
 
 def mask_style_layer(a, x, mask_img):
   _, h, w, d = a.get_shape()
