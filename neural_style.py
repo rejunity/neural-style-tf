@@ -394,16 +394,35 @@ def gram_matrix(x, area, depth):
   G = tf.matmul(tf.transpose(F), F)
   return G
 
-def histogram_layer_loss(a, x, nbins):
+def histogram_layer_loss(a, x, nbins, feature_gamma):
   _, h, w, d = a.get_shape()
   M = h.value * w.value
   N = d.value
 
+  # compress features using gamma power curve to [0..1] range
+  # makes the following descreetization to fit data better
+  value_range = [tf.reduce_min(a), tf.reduce_max(a)]
+  a = compress(a, value_range, feature_gamma)
+  x = compress(x, value_range, feature_gamma)
+
   x_matched_to_a, x = match_histogram_featurewise(a, x, M, N, nbins)
   x_matched_to_a = tf.stop_gradient(x_matched_to_a)
 
+  x_matched_to_a = decompress(x_matched_to_a, value_range, feature_gamma)
+  x = decompress(x, value_range, feature_gamma)
+
   loss = (1./(N * M)) * tf.reduce_sum(tf.pow((x - x_matched_to_a), 2))
   return loss
+
+def compress(x, value_range, gamma):
+  x = (x - value_range[0]) / (value_range[1] - value_range[0]) # remove bias and normalize
+  x = tf.pow(x, 1/gamma)
+  return x
+
+def decompress(x, value_range, gamma):
+  x = tf.pow(x, gamma)
+  x = x * (value_range[1] - value_range[0]) + value_range[0]
+  return x
 
 def match_histogram_featurewise(a, x, area, depth, nbins):
   a = tf.squeeze(a, axis=[0])
@@ -486,7 +505,7 @@ def sum_histogram_losses(sess, net, style_imgs):
       a = sess.run(net[layer])
       x = net[layer] # we are optimizing x
       a = tf.convert_to_tensor(a) # towards a
-      histogram_loss += histogram_layer_loss(a, x, args.histogram_bins) * weight
+      histogram_loss += histogram_layer_loss(a, x, args.histogram_bins, feature_gamma=4.0) * weight
     histogram_loss /= float(len(args.histogram_layers))
     total_histogram_loss += (histogram_loss * img_weight)
   total_histogram_loss /= float(len(style_imgs))

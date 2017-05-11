@@ -83,23 +83,7 @@ def histogram_fixed_width(values, value_range, nbins=100):
     indices,
     nbins), indices
 
-FEATURE_GAMMA = 4.0
-def compress(x, value_range):
-  x = (x-value_range[0]) / (value_range[1] - value_range[0]) # remove bias and normalize
-  x = tf.pow(x, 1/FEATURE_GAMMA)
-  return x
-
-def decompress(x, value_range):
-  x = tf.pow(x, FEATURE_GAMMA)
-  x = x * (value_range[1] - value_range[0]) + value_range[0]
-  return x
-
 def match_histogram(source, template, nbins):
-
-  value_range = [tf.reduce_min(template), tf.reduce_max(template)]
-  source = compress(source, value_range)
-  template = compress(template, value_range)
-
   t_value_range = [tf.reduce_min(template), tf.reduce_max(template)]
   s_value_range = [tf.reduce_min(source), tf.reduce_max(source)]
   #s_value_range = value_range
@@ -120,7 +104,5 @@ def match_histogram(source, template, nbins):
   interp_t_values = interp_linear(s_cdf, t_cdf, t_values, nbins)
   interp_t_values = tf.maximum(interp_t_values, 0.0)
   values = tf.gather(interp_t_values, indices)
-
-  values = decompress(values, value_range)
 
   return values
