@@ -128,7 +128,7 @@ def parse_args():
   
   parser.add_argument('--device', type=str, 
     default='/gpu:0',
-    choices=['/gpu:0', '/cpu:0'],
+    choices=['/gpu:0', '/cpu:0', 'any'],
     help='GPU or CPU mode.  GPU mode requires NVIDIA CUDA. (default|recommended: %(default)s)')
   
   parser.add_argument('--img_output_dir', type=str, 
@@ -212,6 +212,10 @@ def parse_args():
     help='Maximum number of optimizer iterations for each frame after the first frame. (default: %(default)s)')
 
   args = parser.parse_args()
+
+  # if device name is not specified, allow Tensorflow to pick the best available option
+  if args.device == 'any' or args.device == '':
+    args.device = None
 
   # normalize weights
   args.style_layer_weights   = normalize(args.style_layer_weights)
